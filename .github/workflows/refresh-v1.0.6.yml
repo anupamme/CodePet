@@ -21,10 +21,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: v1.0.6
-      SOURCE_SHA: a24d94a38cc29882046c501b7e1e8cec9e6f6a92
-      OLD_SHA: be2c33d6240895a3616058089bd70e012b4894d6
-      BUILD_RUN: "38558472142"
-      CI_RUN: "38558472148"
+      SOURCE_SHA: d874a90e673b7b7fea9756d1646563b3695083b4
+      OLD_SHA: a24d94a38cc29882046c501b7e1e8cec9e6f6a92
+      BUILD_RUN: "38565671305"
+      CI_RUN: "38565671388"
     steps:
       - uses: actions/checkout@v4
       - name: Check the successful build and current release

@@ -1,0 +1,106 @@
+name: Refresh v1.0.6 assets
+
+on:
+  push:
+    branches: [codex/refresh-v1.0.6-assets]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: v1.0.6
+      SOURCE_SHA: a24d94a38cc29882046c501b7e1e8cec9e6f6a92
+      OLD_SHA: be2c33d6240895a3616058089bd70e012b4894d6
+      BUILD_RUN: "38558472142"
+      CI_RUN: "38558472148"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the successful build and current release
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run_id in "$BUILD_RUN" "$CI_RUN"; do
+            gh api "repos/$GH_REPO/actions/runs/$run_id" > run.json
+            jq -e --arg sha "$SOURCE_SHA" '.head_sha == $sha and .conclusion == "success"' run.json
+          done
+          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" > original-tag.json
+          jq -e --arg sha "$OLD_SHA" '.object.type == "commit" and .object.sha == $sha' original-tag.json
+          test "$(node -p 'require("./package.json").version')" = 1.0.6
+      - name: Download and validate the new bundle and release backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir new backup
+          gh run download "$BUILD_RUN" --name "CodePet-$SOURCE_SHA-all-platforms" --dir new
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > backup/release.json
+          cp original-tag.json backup/tag.json
+          jq -e '.draft == false and .immutable != true' backup/release.json
+          gh release download "$RELEASE_TAG" --dir backup
+          (cd new && sha256sum -c SHA256SUMS)
+          (cd backup && sha256sum -c SHA256SUMS)
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          names = {'CodePet-1.0.6.exe', 'CodePet-1.0.6-x86_64.AppImage', 'CodePet-1.0.6-x86_64.AppImage.zsync', 'CodePet-1.0.6-mac-universal.dmg', 'SHA256SUMS'}
+          assert {p.name for p in pathlib.Path('new').iterdir()} == names
+          release = json.loads(pathlib.Path('backup/release.json').read_text())
+          assert {a['name'] for a in release['assets']} == names
+          for asset in release['assets']:
+              data = pathlib.Path('backup', asset['name']).read_bytes()
+              assert len(data) == asset['size']
+              assert 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest']
+          PY
+          sed -n '/^### English/,$p' CHANGELOG.md > release-notes.md
+          printf '\nUpdated packages / 배포 파일 갱신: 2026-10-14\n\n[Source / 소스](https://github.com/%s/commit/%s)\n' "$GH_REPO" "$SOURCE_SHA" >> release-notes.md
+      - name: Preserve the original release for rollback
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1.0.6-before-refresh-${{ github.run_id }}
+          path: backup/
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
+      - name: Replace assets and align the source tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          rollback() {
+            local status=$?
+            trap - ERR
+            set +e
+            gh release upload "$RELEASE_TAG" backup/CodePet-* backup/SHA256SUMS --clobber
+            jq '{body, target_commitish}' backup/release.json > rollback-release.json
+            release_id="$(jq -r .id backup/release.json)"
+            gh api --method PATCH "repos/$GH_REPO/releases/$release_id" --input rollback-release.json
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" -f sha="$OLD_SHA" -F force=true
+            exit "$status"
+          }
+          trap rollback ERR
+          gh release upload "$RELEASE_TAG" new/CodePet-* new/SHA256SUMS --clobber
+          gh release edit "$RELEASE_TAG" --target "$SOURCE_SHA" --notes-file release-notes.md
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" -f sha="$SOURCE_SHA" -F force=true
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > refreshed-release.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          release = json.loads(pathlib.Path('refreshed-release.json').read_text())
+          assets = {a['name']: a for a in release['assets']}
+          assert set(assets) == {p.name for p in pathlib.Path('new').iterdir()}
+          for name, asset in assets.items():
+              data = pathlib.Path('new', name).read_bytes()
+              assert len(data) == asset['size']
+              assert 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest']
+              print(name, len(data), asset['digest'])
+          PY
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)" = "$SOURCE_SHA"
+          trap - ERR
